@@ -1,13 +1,13 @@
-# ActiveSG football watcher
+# Football watcher
 
-Polls the ActiveSG programmes API every ~10 minutes and sends you a **Telegram**
+Polls the rogrammes API every ~10 minutes and sends you a **Telegram**
 message the moment a new football programme is listed (or an existing one's
 registration / slots change). Runs for free on **GitHub Actions** — no server,
 no laptop left on.
 
 ## How it works
 
-ActiveSG's site is a JavaScript app: the football listings load from a hidden
+site is a JavaScript app: the football listings load from a hidden
 JSON API. This bot calls that API directly, remembers what it saw last time (in
 `state.json`), and alerts you on anything new. The first run just records a
 baseline silently — alerts start from the second run onward.
@@ -18,7 +18,7 @@ baseline silently — alerts start from the second run onward.
 
 ### 1. Get the API endpoint  ← the only fiddly bit
 
-1. Open your ActiveSG football page in **Chrome on a computer**.
+1. Open your football page in **Chrome on a computer**.
 2. Press **F12** → click the **Network** tab → click **Fetch/XHR**.
 3. Press **Ctrl/Cmd-R** to reload the page.
 4. Click through the requests and find the one that returns the football
