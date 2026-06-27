@@ -1,0 +1,48 @@
+name: ActiveSG football watcher
+
+on:
+  schedule:
+    # Every 10 minutes (times are UTC; GitHub may delay runs under load).
+    # Tighten to "*/5 * * * *" if you want, but GitHub won't reliably go
+    # faster than ~5 min and asks you to be gentle on scheduled jobs.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}   # also lets you trigger a run manually from the UI
+
+permissions:
+  contents: write          # required so the job can commit state.json back
+
+concurrency:
+  group: activesg-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run watcher
+        env:
+          ACTIVESG_ENDPOINT: ${{ secrets.ACTIVESG_ENDPOINT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python activesg_watcher.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "No state change."
+          else
+            git commit -m "Update watcher state [skip ci]"
+            git push
+          fi
