@@ -2,14 +2,14 @@ name: ActiveSG football watcher
 
 on:
   schedule:
-    # Every 10 minutes (times are UTC; GitHub may delay runs under load).
-    # Tighten to "*/5 * * * *" if you want, but GitHub won't reliably go
-    # faster than ~5 min and asks you to be gentle on scheduled jobs.
-    - cron: "*/10 * * * *"
-  workflow_dispatch: {}   # also lets you trigger a run manually from the UI
+    # Every 15 minutes (UTC; GitHub may delay under load). A headless-browser
+    # run uses more Actions minutes than a plain request — see README for the
+    # minutes math and why a PUBLIC repo (unlimited minutes) is recommended.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
 
 permissions:
-  contents: write          # required so the job can commit state.json back
+  contents: write
 
 concurrency:
   group: activesg-watcher
@@ -25,14 +25,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+
       - name: Run watcher
         env:
-          ACTIVESG_ENDPOINT: ${{ secrets.ACTIVESG_ENDPOINT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ACTIVESG_PAGE_URL: ${{ secrets.ACTIVESG_PAGE_URL }}
+          ACTIVESG_ENDPOINT: ${{ secrets.ACTIVESG_ENDPOINT }}
         run: python activesg_watcher.py
 
       - name: Commit updated state
