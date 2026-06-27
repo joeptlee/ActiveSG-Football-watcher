@@ -1,4 +1,4 @@
-name: ActiveSG football watcher
+name: football watcher
 
 on:
   schedule:
