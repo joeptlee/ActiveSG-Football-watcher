@@ -35,12 +35,14 @@ from playwright.sync_api import sync_playwright
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-PAGE_URL = os.environ.get(
-    "ACTIVESG_PAGE_URL",
+DEFAULT_PAGE_URL = (
     "https://activesg.gov.sg/programmes"
     "?keywords=Football&activity-ids=mlhxSk7lNvZvXXSQXD7Ea"
-    "&show-available-only=false",
-).strip()
+    "&show-available-only=false"
+)
+# Use the default when the env var is missing OR present-but-empty (an unset
+# GitHub secret is passed through as an empty string).
+PAGE_URL = os.environ.get("ACTIVESG_PAGE_URL", "").strip() or DEFAULT_PAGE_URL
 
 # Optional raw API URL, only used as a fallback if we don't intercept the
 # page's own call. (This is the long /api/trpc/programme.list?input=... URL.)
