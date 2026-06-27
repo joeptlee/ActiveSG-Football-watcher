@@ -21,7 +21,8 @@ import os
 import sys
 from pathlib import Path
 
-import requests
+import requests                       # used for the Telegram call
+from curl_cffi import requests as cffi  # browser-impersonating fetch (beats WAF 403s)
 
 ENDPOINT = os.environ.get("ACTIVESG_ENDPOINT", "").strip()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -55,15 +56,33 @@ def fail(msg: str) -> None:
 
 def fetch() -> object:
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0 Safari/537.36"
-        ),
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-SG,en;q=0.9",
+        "Referer": "https://activesg.gov.sg/",
+        "Origin": "https://activesg.gov.sg",
     }
     headers.update(EXTRA_HEADERS)
-    resp = requests.get(ENDPOINT, headers=headers, timeout=TIMEOUT)
+    try:
+        # impersonate makes the TLS handshake + headers look like real Chrome,
+        # which is what defeats most "403 Forbidden" bot blocks.
+        resp = cffi.get(
+            ENDPOINT, headers=headers, timeout=TIMEOUT, impersonate="chrome"
+        )
+    except Exception as exc:  # network/DNS/TLS errors
+        fail(f"Request to the endpoint failed: {exc}")
+
+    if resp.status_code == 403:
+        fail(
+            "403 Forbidden — the server refused the request even with browser "
+            "impersonation. This usually means ActiveSG is blocking by "
+            "region/IP (GitHub's runners are outside Singapore). See the "
+            "'If you get a 403' section in the README for options."
+        )
+    if resp.status_code == 404:
+        fail(
+            "404 Not Found — the endpoint URL is wrong. Re-grab it from the "
+            "Network tab (the request that returns JSON, not the page HTML)."
+        )
     resp.raise_for_status()
     try:
         return resp.json()
