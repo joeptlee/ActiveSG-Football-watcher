@@ -1,62 +1,49 @@
 #!/usr/bin/env python3
 """
-ActiveSG football programme watcher (headless-browser edition).
+ActiveSG multi-sport programme watcher (headless-browser edition).
 
 ActiveSG sits behind Cloudflare's "managed challenge", so plain HTTP requests
-get a 403. This version drives a real headless Chromium (via Playwright): it
-loads the programmes page like a normal browser, Cloudflare hands it the
-clearance cookie, and we capture the programme.list API response the page
-makes. We then alert via Telegram when a new programme appears or the total
-programme count rises (a new season/slot opening).
+get a 403. This bot drives a real headless Chromium (Playwright): it loads each
+sport's programmes page like Chrome, Cloudflare hands it the clearance cookie
+(obtained once, reused across sports), and the bot captures the programme.list
+API response each page makes. It then alerts via Telegram when a new programme
+appears or the total listing count rises (a new season / slot opening).
 
-State is persisted in state.json, which the GitHub Actions workflow commits
-back to the repo between runs.
+Each sport keeps its own state-<sport>.json file so they never overwrite each
+other. The GitHub Actions workflow commits those files back between runs.
 
-Config via environment variables (GitHub Actions secrets / vars):
+Config via environment variables (GitHub Actions secrets):
   TELEGRAM_BOT_TOKEN   - from @BotFather (required)
   TELEGRAM_CHAT_ID     - your chat id (required)
-  ACTIVESG_PAGE_URL    - the football programmes page to load (optional;
-                         a sensible default is built in)
-  ACTIVESG_ENDPOINT    - the raw JSON API URL (optional; used only as a
-                         fallback if page interception doesn't catch it)
-  ACTIVESG_BOOKING_URL - optional human link included in alerts
+
+To add/remove a sport, edit the SPORTS list below (name + activity id).
 """
 
 import hashlib
 import json
-import os
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 import requests  # used only for the Telegram call
 from playwright.sync_api import sync_playwright
 
+import os
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-DEFAULT_PAGE_URL = (
-    "https://activesg.gov.sg/programmes"
-    "?keywords=Football&activity-ids=mlhxSk7lNvZvXXSQXD7Ea"
-    "&show-available-only=false"
-)
-# Use the default when the env var is missing OR present-but-empty (an unset
-# GitHub secret is passed through as an empty string).
-PAGE_URL = os.environ.get("ACTIVESG_PAGE_URL", "").strip() or DEFAULT_PAGE_URL
+# ---- Sports to watch. Add a line (name, emoji, ActiveSG activity id). ------ #
+SPORTS = [
+    {"name": "Football",   "emoji": "\u26bd", "id": "mlhxSk7lNvZvXXSQXD7Ea"},
+    {"name": "Badminton",  "emoji": "\U0001f3f8", "id": "YLONatwvqJfikKOmB5N9U"},
+    {"name": "Basketball", "emoji": "\U0001f3c0", "id": "CyIu0PE42fqR0SHD7XwMB"},
+    {"name": "Tennis",     "emoji": "\U0001f3be", "id": "B0KovYOcQun1mA4VowDq0"},
+]
 
-# Optional raw API URL, only used as a fallback if we don't intercept the
-# page's own call. (This is the long /api/trpc/programme.list?input=... URL.)
-ENDPOINT = os.environ.get("ACTIVESG_ENDPOINT", "").strip()
-
-BOOKING_URL = os.environ.get(
-    "ACTIVESG_BOOKING_URL",
-    "https://activesg.gov.sg/programmes?keywords=Football",
-).strip()
-
-STATE_FILE = Path("state.json")
 TELEGRAM_TIMEOUT = 30
 PAGE_TIMEOUT_MS = 60000
-CAPTURE_DEADLINE_S = 60
+CAPTURE_DEADLINE_S = 45
 
 
 def fail(msg: str) -> None:
@@ -64,10 +51,40 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
+def page_url(sport: dict) -> str:
+    return (
+        "https://activesg.gov.sg/programmes"
+        f"?keywords={urllib.parse.quote(sport['name'])}"
+        f"&activity-ids={sport['id']}&show-available-only=false"
+    )
+
+
+def api_url(sport: dict) -> str:
+    """The raw tRPC URL for a sport — used only as an in-page fallback."""
+    payload = {
+        "json": {
+            "activityIds": [sport["id"]],
+            "searchQuery": None, "minAgeFilter": None, "maxAgeFilter": None,
+            "venueId": None, "postalCode": None, "sexFilter": None,
+            "showAvailableOnlyFilter": False,
+            "firstSessionFromDate": None, "lastSessionTillDate": None,
+            "limit": 10, "direction": "forward",
+        },
+        "meta": {"values": {"venueId": ["undefined"]}},
+    }
+    q = urllib.parse.quote(json.dumps(payload, separators=(",", ":")))
+    return f"https://activesg.gov.sg/api/trpc/programme.list?input={q}"
+
+
+def booking_link(sport: dict) -> str:
+    return f"https://activesg.gov.sg/programmes?keywords={urllib.parse.quote(sport['name'])}"
+
+
 # --------------------------------------------------------------------------- #
-# Fetch: drive a real browser, clear Cloudflare, capture the API response.
+# Fetch every sport in one browser session (Cloudflare cleared once, reused).
 # --------------------------------------------------------------------------- #
-def fetch() -> object:
+def fetch_all() -> dict:
+    results: dict = {}
     captured: dict = {}
 
     with sync_playwright() as p:
@@ -89,27 +106,34 @@ def fetch() -> object:
 
         def on_response(resp):
             if "/api/trpc/programme.list" in resp.url and resp.status == 200:
-                try:
-                    captured["data"] = resp.json()
-                except Exception:
-                    pass
+                for s in SPORTS:
+                    if s["id"] in resp.url:
+                        try:
+                            captured[s["id"]] = resp.json()
+                        except Exception:
+                            pass
 
         page.on("response", on_response)
 
-        try:
-            page.goto(PAGE_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-        except Exception as exc:
-            browser.close()
-            fail(f"Failed to load the page (Cloudflare or network): {exc}")
+        for s in SPORTS:
+            captured.pop(s["id"], None)
+            try:
+                page.goto(page_url(s), wait_until="domcontentloaded",
+                          timeout=PAGE_TIMEOUT_MS)
+            except Exception as exc:
+                print(f"WARN: {s['name']} page failed to load: {exc}",
+                      file=sys.stderr)
+                continue
 
-        # Wait for Cloudflare to clear and the app to call the API.
-        deadline = time.time() + CAPTURE_DEADLINE_S
-        while "data" not in captured and time.time() < deadline:
-            page.wait_for_timeout(1000)
+            deadline = time.time() + CAPTURE_DEADLINE_S
+            while s["id"] not in captured and time.time() < deadline:
+                page.wait_for_timeout(1000)
 
-        # Fallback: once the challenge is cleared, fetch the endpoint ourselves
-        # from inside the page (same-origin, carries the clearance cookie).
-        if "data" not in captured and ENDPOINT:
+            if s["id"] in captured:
+                results[s["name"]] = captured[s["id"]]
+                continue
+
+            # Fallback: fetch this sport's API directly from inside the cleared page.
             try:
                 result = page.evaluate(
                     """async (url) => {
@@ -119,48 +143,33 @@ def fetch() -> object:
                         if (!r.ok) return {__http_error: r.status};
                         return await r.json();
                     }""",
-                    ENDPOINT,
+                    api_url(s),
                 )
                 if isinstance(result, dict) and "__http_error" in result:
-                    browser.close()
-                    fail(
-                        f"In-page fetch returned HTTP {result['__http_error']}. "
-                        "Cloudflare likely did not clear on this IP (common on "
-                        "datacenter IPs like GitHub's). See README."
-                    )
-                captured["data"] = result
+                    print(f"WARN: {s['name']} in-page fetch HTTP "
+                          f"{result['__http_error']}", file=sys.stderr)
+                else:
+                    results[s["name"]] = result
             except Exception as exc:
-                browser.close()
-                fail(f"In-page fallback fetch failed: {exc}")
+                print(f"WARN: {s['name']} fallback fetch failed: {exc}",
+                      file=sys.stderr)
 
         browser.close()
 
-    if "data" not in captured:
-        fail(
-            "Could not retrieve programme data — the Cloudflare challenge did "
-            "not clear (common on datacenter IPs). If this persists on GitHub, "
-            "we add a residential proxy. See the README."
-        )
-    return captured["data"]
+    return results
 
 
 # --------------------------------------------------------------------------- #
 # Parsing helpers (tuned to ActiveSG's tRPC shape, with generic fallbacks).
 # --------------------------------------------------------------------------- #
 def find_programmes(data: object) -> list:
-    """Find the list of programmes. Prefer an explicit 'programmes' key
-    (ActiveSG's shape) so we don't accidentally pick a sessions array."""
     named: list = []
 
     def walk_named(node):
         if isinstance(node, dict):
             for k, v in node.items():
-                if (
-                    k == "programmes"
-                    and isinstance(v, list)
-                    and v
-                    and all(isinstance(x, dict) for x in v)
-                ):
+                if (k == "programmes" and isinstance(v, list) and v
+                        and all(isinstance(x, dict) for x in v)):
                     named.append(v)
                 walk_named(v)
         elif isinstance(node, list):
@@ -171,7 +180,6 @@ def find_programmes(data: object) -> list:
     if named:
         return max(named, key=len)
 
-    # Fallback: largest array of dicts anywhere.
     best: list = []
 
     def walk(node):
@@ -190,8 +198,6 @@ def find_programmes(data: object) -> list:
 
 
 def find_total(data: object):
-    """Return meta.totalCount if present (counts ALL matching programmes,
-    not just the first page)."""
     totals: list = []
 
     def walk(node):
@@ -227,7 +233,7 @@ def guess(p: dict, *needles: str):
 
 def describe(p: dict) -> str:
     title = p.get("title") or guess(p, "title", "name") or "(untitled programme)"
-    lines = [f"⚽ {title}"]
+    lines = [title]
 
     venue = None
     if isinstance(p.get("venue"), dict):
@@ -261,15 +267,14 @@ def describe(p: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Telegram + state
+# Telegram + per-sport state
 # --------------------------------------------------------------------------- #
 def telegram(text: str) -> None:
     if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
         fail("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set.")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     resp = requests.post(
-        url,
-        timeout=TELEGRAM_TIMEOUT,
+        url, timeout=TELEGRAM_TIMEOUT,
         json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
               "disable_web_page_preview": True},
     )
@@ -278,43 +283,44 @@ def telegram(text: str) -> None:
     resp.raise_for_status()
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
+def state_path(name: str) -> Path:
+    return Path(f"state-{name.lower()}.json")
+
+
+def load_state(path: Path) -> dict:
+    if path.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            return json.loads(path.read_text())
         except (ValueError, OSError):
             return {}
     return {}
 
 
-def save_state(seen_ids, total) -> None:
-    STATE_FILE.write_text(
-        json.dumps(
-            {"initialised": True, "seen_ids": sorted(seen_ids), "total": total},
-            indent=2,
-        )
-    )
+def save_state(path: Path, seen_ids, total) -> None:
+    path.write_text(json.dumps(
+        {"initialised": True, "seen_ids": sorted(seen_ids), "total": total},
+        indent=2,
+    ))
 
 
 # --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
-def main() -> None:
-    data = fetch()
+def process_sport(sport: dict, data: object) -> None:
+    name, emoji = sport["name"], sport["emoji"]
+    path = state_path(name)
+    link = booking_link(sport)
+
     programmes = find_programmes(data)
     total = find_total(data)
     if total is None:
         total = len(programmes)
 
-    state = load_state()
+    state = load_state(path)
     seen_ids = set(state.get("seen_ids", []))
     prev_total = state.get("total")
     first_run = not state.get("initialised", False)
 
-    # Guard against a transient empty/blocked response wiping the baseline.
     if not programmes and seen_ids:
-        print("Zero programmes returned but we had some before — treating as a "
-              "transient blip, keeping baseline, skipping this run.")
+        print(f"{name}: zero programmes but had some before — transient, skipping.")
         return
 
     current_ids = {prog_id(p) for p in programmes}
@@ -322,25 +328,36 @@ def main() -> None:
     new_ids = [i for i in current_ids if i not in seen_ids]
 
     if first_run:
-        print(f"First run — baseline recorded: {len(current_ids)} programmes "
-              f"on the first page, total={total}. No alerts on first run.")
+        print(f"{name}: first run — baseline {len(current_ids)} on page, "
+              f"total {total}. No alerts.")
     else:
         for i in new_ids:
-            msg = "NEW football programme listed:\n\n" + describe(details[i])
-            telegram(f"{msg}\n\nBook: {BOOKING_URL}")
-            print("Alert (new programme):\n" + msg + "\n")
+            msg = f"{emoji} {name}: NEW programme listed\n\n" + describe(details[i])
+            telegram(f"{msg}\n\nBook: {link}")
+            print(f"{name} alert (new): {details[i].get('title')}")
 
-        # totalCount rose but the new items are beyond the first page.
         if prev_total is not None and total > prev_total and not new_ids:
-            telegram(
-                f"ActiveSG football: listings rose {prev_total} → {total}. "
-                f"A new season or slot may have opened.\n\nCheck: {BOOKING_URL}"
-            )
-            print(f"Alert (total rose {prev_total} -> {total})")
+            telegram(f"{emoji} {name}: listings rose {prev_total} \u2192 {total}. "
+                     f"A new season or slot may have opened.\n\nCheck: {link}")
+            print(f"{name} alert (total {prev_total}->{total})")
 
-    save_state(seen_ids | current_ids, total)
-    print(f"Done. First page: {len(current_ids)} programmes "
-          f"({len(new_ids)} new). Total listings: {total}.")
+    save_state(path, seen_ids | current_ids, total)
+    print(f"{name}: done. {len(current_ids)} on page ({len(new_ids)} new), "
+          f"total {total}.")
+
+
+def main() -> None:
+    data_by_sport = fetch_all()
+    if not data_by_sport:
+        fail("No data captured for any sport — Cloudflare likely did not clear. "
+             "See README ('If it can't get past Cloudflare').")
+
+    for sport in SPORTS:
+        data = data_by_sport.get(sport["name"])
+        if data is None:
+            print(f"{sport['name']}: no data this cycle, skipping.")
+            continue
+        process_sport(sport, data)
 
 
 if __name__ == "__main__":
